@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Arena Live",
+      "hasCanvas": false,
+      "bodyTextLen": 413,
+      "bodyTextHash": "a7fef298731482987562af0fb8c7e4474d52a74a5bf1fdc989b3e90349159c37",
+      "bodyTextPrefix": "LIVE Arena Live Comentários entram na arena. Presentes viram pod",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Arena Live",
+      "hasCanvas": false,
+      "bodyTextLen": 413,
+      "bodyTextHash": "a7fef298731482987562af0fb8c7e4474d52a74a5bf1fdc989b3e90349159c37",
+      "bodyTextPrefix": "LIVE Arena Live Comentários entram na arena. Presentes viram pod",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

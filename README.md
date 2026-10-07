@@ -1,2 +1,0 @@
-# tiktoklive
-Live interativa
