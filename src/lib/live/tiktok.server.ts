@@ -1,7 +1,12 @@
-import { ControlEvent, TikTokLiveConnection, WebcastEvent } from "tiktok-live-connector";
+import WebSocket from "ws";
 import type { LiveEvent, LiveUser } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
+
+type EulerMessage = {
+  type?: string;
+  data?: unknown;
+};
 
 function asRecord(value: unknown): UnknownRecord {
   return value && typeof value === "object" ? (value as UnknownRecord) : {};
@@ -12,11 +17,13 @@ function asString(value: unknown, fallback = ""): string {
 }
 
 function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
 }
 
 function avatarFrom(user: UnknownRecord): string | undefined {
-  const direct = asString(user.profilePictureUrl);
+  const direct = asString(user.profilePictureUrl) || asString(user.avatarUrl);
   if (direct) return direct;
   const pic = asRecord(user.profilePicture);
   const urls = pic.urlList ?? pic.urls ?? pic.url;
@@ -27,16 +34,11 @@ function avatarFrom(user: UnknownRecord): string | undefined {
 
 function userFrom(data: unknown): LiveUser {
   const root = asRecord(data);
-  const user = asRecord(root.user);
-  const uniqueId = asString(user.uniqueId, asString(user.unique_id, "anon"));
-  const nickname = asString(user.nickname, uniqueId);
-  const userId = asString(user.userId, asString(user.user_id, uniqueId));
-  return {
-    userId,
-    uniqueId,
-    nickname,
-    avatarUrl: avatarFrom(user),
-  };
+  const user = asRecord(root.user ?? root.userInfo ?? root.author);
+  const uniqueId = asString(user.uniqueId, asString(user.unique_id, asString(user.displayId, "anon")));
+  const nickname = asString(user.nickname, asString(user.displayName, uniqueId));
+  const userId = asString(user.userId, asString(user.user_id, asString(user.id, uniqueId)));
+  return { userId, uniqueId, nickname, avatarUrl: avatarFrom(user) };
 }
 
 export function translateLiveError(message: string): string {
@@ -47,10 +49,81 @@ export function translateLiveError(message: string): string {
   if (m.includes("not found") || m.includes("no user") || m.includes("user_not_found")) {
     return "Usuário não encontrado. Confira o @ sem espaços.";
   }
+  if (m.includes("api key") || m.includes("invalid auth") || m.includes("permission")) {
+    return "A chave da Euler Stream não está configurada ou não tem permissão. Configure EULER_API_KEY no Render.";
+  }
   if (m.includes("timeout") || m.includes("timed out") || m.includes("tempo")) {
     return "A conexão demorou demais. A live está aberta?";
   }
   return "Não foi possível conectar à live. Tente outro @ ou jogue o demo.";
+}
+
+function normalizeEulerMessages(value: unknown): EulerMessage[] {
+  const root = asRecord(value);
+  const messages = root.messages;
+  if (Array.isArray(messages)) return messages.map(asRecord) as EulerMessage[];
+  if (root.type || root.data) return [root as EulerMessage];
+  return [];
+}
+
+function mapEulerMessage(message: EulerMessage): LiveEvent | null {
+  const type = asString(message.type).toLowerCase();
+  const data = asRecord(message.data);
+
+  if (type === "roominfo" || type === "room_info") {
+    const roomId = asString(data.roomId, asString(data.room_id));
+    return { type: "status", connected: true, uniqueId: asString(data.uniqueId), message: roomId ? `Sala ${roomId}` : "Conectado" };
+  }
+
+  if (type === "chat" || type === "comment") {
+    const comment = asString(data.comment, asString(data.text));
+    if (!comment) return null;
+    return { type: "chat", ...userFrom(data), comment };
+  }
+
+  if (type === "gift") {
+    return {
+      type: "gift",
+      ...userFrom(data),
+      giftName: asString(data.giftName, asString(data.gift_name, "Presente")),
+      diamondCount: Math.max(1, asNumber(data.diamondCount, asNumber(data.diamond_count, 1))),
+      repeatCount: Math.max(1, asNumber(data.repeatCount, asNumber(data.repeat_count, 1))),
+      repeatEnd: data.repeatEnd !== false && data.repeat_end !== false,
+    };
+  }
+
+  if (type === "like") {
+    return { type: "like", ...userFrom(data), likeCount: Math.max(1, asNumber(data.likeCount, asNumber(data.like_count, 1))) };
+  }
+
+  if (type === "follow") return { type: "follow", ...userFrom(data) };
+  if (type === "share") return { type: "share", ...userFrom(data) };
+
+  if (type === "member" || type === "join" || type === "syntheticjoinmessage") {
+    return { type: "status", connected: true, uniqueId: userFrom(data).uniqueId, message: `${userFrom(data).nickname} entrou na live.` };
+  }
+
+  if (type === "roomuserseq" || type === "room_user" || type === "roomupdate" || type === "room.update") {
+    const count = asNumber(data.viewerCount, asNumber(data.viewer_count, asNumber(data.totalUser)));
+    return count > 0 ? { type: "viewer", count } : null;
+  }
+
+  if (type === "streamend" || type === "stream_end" || type === "tiktok.disconnect") {
+    return { type: "status", connected: false, message: "A live encerrou." };
+  }
+
+  if (type === "room.status") {
+    const state = asString(data.state);
+    if (state === "offline" || state === "ended" || state === "error") {
+      return { type: "status", connected: false, message: asString(data.message, "A live encerrou ou ficou indisponível.") };
+    }
+    if (state === "connected") {
+      const roomId = asString(data.roomId);
+      return { type: "status", connected: true, message: roomId ? `Sala ${roomId}` : "Conectado" };
+    }
+  }
+
+  return null;
 }
 
 export function connectTikTokLive(
@@ -61,154 +134,97 @@ export function connectTikTokLive(
 ): { disconnect: () => void } {
   const uniqueId = rawId.replace(/^@/, "").trim();
   const diagnostic = options.diagnostic === true;
+  const apiKey = process.env.EULER_API_KEY?.trim();
+
+  if (!apiKey) {
+    onFatal("EULER_API_KEY não configurada no servidor.");
+    return { disconnect: () => {} };
+  }
 
   const logDiagnostic = (stage: string, details?: unknown) => {
     if (!diagnostic) return;
-    const payload = details instanceof Error
-      ? { name: details.name, message: details.message, stack: details.stack }
-      : details;
-    console.error(`[TikTok LIVE][diagnostic][${stage}]`, payload ?? "");
+    console.error(`[TikTok LIVE][diagnostic][${stage}]`, details ?? "");
   };
 
-  logDiagnostic("start", { uniqueId, node: process.version, timestamp: new Date().toISOString() });
-
-  const connection = new TikTokLiveConnection(uniqueId, {
-    processInitialData: false,
-    enableExtendedGiftInfo: true,
+  const params = new URLSearchParams({
+    uniqueId,
+    apiKey,
+    "features.bundleEvents": "true",
+    "features.rawMessages": "false",
+    "features.normalizeUniqueId": "true",
+    schemaVersion: "v2",
   });
 
-  connection.on(ControlEvent.WEBSOCKET_CONNECTED, () => {
+  const ws = new WebSocket(`wss://ws.eulerstream.com?${params.toString()}`);
+  let settled = false;
+  let connected = false;
+  const timer = setTimeout(() => {
+    if (settled || connected) return;
+    settled = true;
+    try { ws.close(); } catch { /* ignore */ }
+    onFatal("A conexão demorou mais de 30 segundos. A live está aberta?");
+  }, 30000);
+
+  ws.on("open", () => {
+    connected = true;
     logDiagnostic("websocketConnected", { uniqueId });
   });
 
-  connection.on(ControlEvent.CONNECTED, (state: unknown) => {
-    logDiagnostic("connected", state);
-  });
-
-  connection.on(ControlEvent.ERROR, (error: unknown) => {
-    logDiagnostic("error-event", error);
-  });
-
-  connection.on(ControlEvent.DISCONNECTED, (details: unknown) => {
-    logDiagnostic("disconnected", details);
-  });
-
-  const safe = (event: LiveEvent) => {
+  ws.on("message", (raw: WebSocket.RawData) => {
     try {
-      onEvent(event);
-    } catch {
-      /* ignore subscriber errors */
+      const parsed = JSON.parse(raw.toString()) as unknown;
+      for (const message of normalizeEulerMessages(parsed)) {
+        const event = mapEulerMessage(message);
+        if (event) onEvent(event);
+      }
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      logDiagnostic("message-parse-error", error);
     }
-  };
-
-  connection.on(WebcastEvent.CHAT, (data: unknown) => {
-    const comment = asString(asRecord(data).comment, "");
-    if (!comment) return;
-    safe({ type: "chat", ...userFrom(data), comment });
   });
 
-  connection.on(WebcastEvent.GIFT, (data: unknown) => {
-    const rec = asRecord(data);
-    const gift = asRecord(rec.gift);
-    const details = asRecord(rec.extendedGiftInfo);
-    const giftName =
-      asString(rec.giftName) ||
-      asString(gift.name) ||
-      asString(details.name) ||
-      "Presente";
-    const diamondCount =
-      asNumber(rec.diamondCount) ||
-      asNumber(gift.diamond_count) ||
-      asNumber(details.diamond_count) ||
-      1;
-    const repeatCount = Math.max(1, asNumber(rec.repeatCount, 1));
-    const repeatEnd = rec.repeatEnd !== false;
-    safe({
-      type: "gift",
-      ...userFrom(data),
-      giftName,
-      diamondCount,
-      repeatCount,
-      repeatEnd,
-    });
-  });
-
-  connection.on(WebcastEvent.LIKE, (data: unknown) => {
-    const rec = asRecord(data);
-    safe({
-      type: "like",
-      ...userFrom(data),
-      likeCount: Math.max(1, asNumber(rec.likeCount, 1)),
-    });
-  });
-
-  connection.on(WebcastEvent.FOLLOW, (data: unknown) => {
-    safe({ type: "follow", ...userFrom(data) });
-  });
-
-  connection.on(WebcastEvent.SHARE, (data: unknown) => {
-    safe({ type: "share", ...userFrom(data) });
-  });
-
-  connection.on(WebcastEvent.ROOM_USER, (data: unknown) => {
-    const rec = asRecord(data);
-    const count =
-      asNumber(rec.viewerCount) ||
-      asNumber(asRecord(rec.topViewers).viewerCount) ||
-      asNumber(rec.totalUser);
-    if (count > 0) safe({ type: "viewer", count });
-  });
-
-  connection.on(WebcastEvent.STREAM_END, () => {
-    safe({ type: "status", connected: false, uniqueId, message: "A live encerrou." });
-  });
-
-  let settled = false;
-  const timer = setTimeout(() => {
+  ws.on("error", (error: Error) => {
+    logDiagnostic("error", error);
     if (settled) return;
     settled = true;
-    try {
-      connection.disconnect();
-    } catch {
-      /* ignore */
+    clearTimeout(timer);
+    onFatal(translateLiveError(error.message || String(error)) + `\n\nDiagnóstico: ${error.message || String(error)}`);
+  });
+
+  ws.on("close", (code: number, reason: Buffer) => {
+    clearTimeout(timer);
+    const reasonText = reason?.toString() || "";
+    logDiagnostic("close", { code, reason: reasonText });
+    if (code === 4404) {
+      onFatal("Essa conta não está ao vivo agora. Abra a live e tente de novo, ou jogue o demo.");
+      return;
     }
-    logDiagnostic("timeout", { timeoutMs: 30000, uniqueId });
-    onFatal("A conexão demorou mais de 30 segundos. Veja o terminal para o diagnóstico detalhado.");
-  }, 30000);
-
-  connection
-    .connect()
-    .then((state: { roomId?: string | number }) => {
-      logDiagnostic("connect-resolved", state);
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      safe({
-        type: "status",
-        connected: true,
-        uniqueId,
-        message: state?.roomId ? `Sala ${String(state.roomId)}` : "Conectado",
-      });
-    })
-    .catch((err: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const message = err instanceof Error ? err.message : String(err);
-      logDiagnostic("connect-rejected", err);
-      onFatal(`${translateLiveError(message)}
-
-Diagnóstico: ${message}`);
-    });
+    if (code === 4401 || code === 4403) {
+      onFatal("A chave da Euler Stream não tem permissão para conectar. Verifique EULER_API_KEY.");
+      return;
+    }
+    if (code === 4429) {
+      onFatal("Limite de conexões simultâneas da Euler Stream atingido. Tente novamente em alguns segundos.");
+      return;
+    }
+    if (code === 4005) {
+      onEvent({ type: "status", connected: false, uniqueId, message: "A live encerrou." });
+      return;
+    }
+    if (!connected) {
+      onFatal(reasonText || `Conexão encerrada (código ${code}).`);
+    } else {
+      onEvent({ type: "status", connected: false, uniqueId, message: "Conexão encerrada." });
+    }
+  });
 
   return {
     disconnect: () => {
       clearTimeout(timer);
-      try {
-        connection.disconnect();
-      } catch {
-        /* ignore */
-      }
+      try { ws.close(); } catch { /* ignore */ }
     },
   };
 }

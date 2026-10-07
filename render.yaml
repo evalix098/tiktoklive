@@ -11,3 +11,5 @@ services:
         value: 22
       - key: NITRO_PRESET
         value: node-server
+      - key: EULER_API_KEY
+        sync: false
