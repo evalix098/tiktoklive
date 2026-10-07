@@ -152,7 +152,7 @@ export function connectTikTokLive(
     "features.bundleEvents": "true",
     "features.rawMessages": "false",
     "features.normalizeUniqueId": "true",
-    schemaVersion: "v2",
+    schemaVersion: "v1",
   });
 
   const ws = new WebSocket(`wss://ws.eulerstream.com?${params.toString()}`);
@@ -217,7 +217,9 @@ export function connectTikTokLive(
     if (!connected) {
       onFatal(reasonText || `Conexão encerrada (código ${code}).`);
     } else {
-      onEvent({ type: "status", connected: false, uniqueId, message: "Conexão encerrada." });
+      const detail = reasonText ? ` (${reasonText})` : ` (código ${code})`;
+      logDiagnostic("unexpected-close", { code, reason: reasonText, uniqueId });
+      onEvent({ type: "status", connected: false, uniqueId, message: `Conexão encerrada${detail}.` });
     }
   });
 
