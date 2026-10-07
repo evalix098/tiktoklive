@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: arena-live
+    runtime: node
+    plan: free
+    buildCommand: npm ci && NITRO_PRESET=node-server npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: NITRO_PRESET
+        value: node-server
