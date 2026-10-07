@@ -69,6 +69,7 @@ export class ArenaEngine {
   reducedMotion = false;
   lastSound: { kind: string; t: number } | null = null;
   sounds: string[] = [];
+  private giftProgress = new Map<string, { count: number; t: number }>();
 
   constructor() {
     for (let i = 0; i < MAX_PARTICLES; i++) {
@@ -104,6 +105,7 @@ export class ArenaEngine {
     this.smashCd = 0;
     this.giftAlert = null;
     this.winner = null;
+    this.giftProgress.clear();
     for (const p of this.particles) p.active = false;
     this.pushFeed("system", "Comente para entrar na arena.");
   }
@@ -211,6 +213,7 @@ export class ArenaEngine {
       wanderA: ang,
       wanderT: 0,
       targetId: null,
+      attackCd: 0.2 + Math.random() * 0.4,
       squash: 1,
     };
     this.fighters.push(fighter);
@@ -246,6 +249,10 @@ export class ArenaEngine {
     f.mass = 1;
     f.shield = 0;
     f.titanUntil = 0;
+    f.targetId = null;
+    f.wanderT = 0;
+    f.wanderA = Math.random() * Math.PI * 2;
+    f.attackCd = 0.25 + Math.random() * 0.35;
     f.spawnT = this.time;
     f.squash = 1.2;
   }
@@ -324,11 +331,23 @@ export class ArenaEngine {
     }
 
     if (event.type === "gift") {
-      if (!event.repeatEnd && event.repeatCount > 1) {
+      let deltaCount = Math.max(1, event.repeatCount);
+      if (event.transactionId) {
+        const previous = this.giftProgress.get(event.transactionId);
+        if (previous) {
+          deltaCount = Math.max(0, event.repeatCount - previous.count);
+          previous.count = Math.max(previous.count, event.repeatCount);
+          previous.t = this.time;
+        } else {
+          this.giftProgress.set(event.transactionId, { count: event.repeatCount, t: this.time });
+        }
+      } else if ((event.giftType ?? 0) === 1 && !event.repeatEnd) {
         this.pushFeed("gift", `${event.giftName} x${event.repeatCount}`, event.nickname);
         return;
       }
-      const diamonds = Math.max(1, event.diamondCount * Math.max(1, event.repeatCount));
+      if (deltaCount <= 0) return;
+
+      const diamonds = Math.max(1, event.diamondCount * deltaCount);
       const f = this.spawn(event.uniqueId, event.nickname, event.avatarUrl, Math.min(80, diamonds * 0.2));
       f.diamonds += diamonds;
       this.applyGift(f, event.giftName, diamonds);
@@ -395,6 +414,11 @@ export class ArenaEngine {
     this.giftAlertT -= dt;
     if (this.giftAlertT <= 0) this.giftAlert = null;
     this.trauma = Math.max(0, this.trauma - dt * 1.6);
+    if (this.giftProgress.size > 0 && Math.floor(this.time) % 15 === 0) {
+      for (const [key, value] of this.giftProgress) {
+        if (this.time - value.t > 90) this.giftProgress.delete(key);
+      }
+    }
 
     if (this.hitstop > 0) {
       this.hitstop -= dt;
@@ -436,6 +460,24 @@ export class ArenaEngine {
   private endRound(alive: Fighter[]) {
     this.phase = "results";
     this.phaseT = 0;
+    if (alive.length > 1) {
+      const winner = [...alive].sort((a, b) => {
+        const hpDiff = b.hp - a.hp;
+        if (Math.abs(hpDiff) > 0.001) return hpDiff;
+        const diamondDiff = b.diamonds - a.diamonds;
+        if (diamondDiff !== 0) return diamondDiff;
+        return hash(a.uniqueId) - hash(b.uniqueId);
+      })[0]!;
+      this.winner = winner;
+      winner.wins += 1;
+      for (const f of alive) {
+        if (f !== winner) this.eliminate(f);
+      }
+      this.pushFeed("win", "venceu no desempate", winner.nickname);
+      this.emit(winner.x, winner.y, 28, "confetti", winner.color, 0.32, 0.012);
+      this.sound("win");
+      return;
+    }
     if (alive.length === 1) {
       this.winner = alive[0]!;
       this.winner.wins += 1;
@@ -444,8 +486,18 @@ export class ArenaEngine {
       this.sound("win");
       this.trauma = Math.min(1, this.trauma + 0.3);
     } else {
-      this.winner = null;
-      this.pushFeed("system", "Ninguém ficou de pé.");
+      // Nunca deixa uma rodada travada em empate: se os dois caírem no mesmo
+      // instante, usa o saldo de presentes e depois um desempate determinístico.
+      const winner = [...this.fighters].sort((a, b) => {
+        const diamondDiff = b.diamonds - a.diamonds;
+        if (diamondDiff !== 0) return diamondDiff;
+        return hash(a.uniqueId) - hash(b.uniqueId);
+      })[0]!;
+      this.winner = winner;
+      winner.wins += 1;
+      this.pushFeed("win", "venceu no desempate final", winner.nickname);
+      this.emit(winner.x, winner.y, 28, "confetti", winner.color, 0.32, 0.012);
+      this.sound("win");
     }
   }
 
@@ -463,6 +515,9 @@ export class ArenaEngine {
       f.shield = 0;
       f.titanUntil = 0;
       f.dashUntil = 0;
+      f.targetId = null;
+      f.wanderT = 0;
+      f.attackCd = 0.25 + Math.random() * 0.35;
       this.revive(f);
     }
     this.pushFeed("system", `Rodada ${this.round} — comente para entrar.`);
@@ -475,6 +530,7 @@ export class ArenaEngine {
         f.mass += (1 - f.mass) * 3 * dt;
         f.r += (BASE_RADIUS - f.r) * 3 * dt;
       }
+      f.attackCd = Math.max(0, f.attackCd - dt);
       f.wanderT -= dt;
       if (f.wanderT <= 0) {
         f.wanderT = 0.6 + Math.random() * 1.2;
@@ -537,7 +593,8 @@ export class ArenaEngine {
         const dy = b.y - a.y;
         const d = Math.hypot(dx, dy) || 0.0001;
         const min = a.r + b.r;
-        if (d >= min) continue;
+        const attackRange = min + 0.022;
+        if (d > attackRange) continue;
         const nx = dx / d;
         const ny = dy / d;
         const overlap = min - d;
@@ -559,6 +616,21 @@ export class ArenaEngine {
           const impact = Math.abs(rel);
           if (impact > 0.18) {
             this.hit(a, b, nx, ny, impact);
+          }
+        }
+
+        if (d <= attackRange) {
+          if (a.attackCd <= 0 && a.alive) {
+            const damage = 7 + Math.min(8, Math.hypot(a.vx, a.vy) * 12);
+            this.deal(b, damage * (a.mass / (b.mass + 0.75)), nx, ny);
+            a.attackCd = a.titanUntil > this.time ? 0.45 : 0.7;
+            this.emit((a.x + b.x) / 2, (a.y + b.y) / 2, 3, "spark", a.color, 0.18, 0.006);
+          }
+          if (b.attackCd <= 0 && b.alive) {
+            const damage = 7 + Math.min(8, Math.hypot(b.vx, b.vy) * 12);
+            this.deal(a, damage * (b.mass / (a.mass + 0.75)), -nx, -ny);
+            b.attackCd = b.titanUntil > this.time ? 0.45 : 0.7;
+            this.emit((a.x + b.x) / 2, (a.y + b.y) / 2, 3, "spark", b.color, 0.18, 0.006);
           }
         }
       }

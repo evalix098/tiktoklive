@@ -23,6 +23,8 @@ export type LiveEvent =
       diamondCount: number;
       repeatCount: number;
       repeatEnd: boolean;
+      giftType?: number;
+      transactionId?: string;
     } & LiveUser)
   | ({ type: "like"; likeCount: number } & LiveUser)
   | ({ type: "follow" } & LiveUser)

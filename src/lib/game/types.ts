@@ -28,6 +28,7 @@ export type Fighter = {
   wanderA: number;
   wanderT: number;
   targetId: string | null;
+  attackCd: number;
   squash: number;
 };
 

@@ -16,6 +16,17 @@ function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function asBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "true" || v === "1") return true;
+    if (v === "false" || v === "0" || v === "") return false;
+  }
+  return fallback;
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
@@ -61,7 +72,8 @@ export function translateLiveError(message: string): string {
 function normalizeEulerMessages(value: unknown): EulerMessage[] {
   const root = asRecord(value);
   const messages = root.messages;
-  if (Array.isArray(messages)) return messages.map(asRecord) as EulerMessage[];
+  if (Array.isArray(messages)) return messages.flatMap((item) => normalizeEulerMessages(item));
+  if (Array.isArray(root.data)) return root.data.flatMap((item) => normalizeEulerMessages(item));
   if (root.type || root.data) return [root as EulerMessage];
   return [];
 }
@@ -75,29 +87,44 @@ function mapEulerMessage(message: EulerMessage): LiveEvent | null {
     return { type: "status", connected: true, uniqueId: asString(data.uniqueId), message: roomId ? `Sala ${roomId}` : "Conectado" };
   }
 
-  if (type === "chat" || type === "comment") {
+  if (type === "chat" || type === "comment" || type === "webcastchatmessage") {
     const comment = asString(data.comment, asString(data.text));
     if (!comment) return null;
     return { type: "chat", ...userFrom(data), comment };
   }
 
-  if (type === "gift") {
+  if (type === "gift" || type === "webcastgiftmessage") {
+    const details = asRecord(data.giftDetails ?? data.gift_details);
+    const giftName = asString(
+      data.giftName,
+      asString(data.gift_name, asString(details.giftName, asString(details.gift_name, "Presente"))),
+    );
+    const diamondCount = Math.max(
+      1,
+      asNumber(data.diamondCount, asNumber(data.diamond_count, asNumber(details.diamondCount, asNumber(details.diamond_count, 1)))),
+    );
+    const repeatCount = Math.max(1, asNumber(data.repeatCount, asNumber(data.repeat_count, 1)));
+    const repeatEnd = asBoolean(data.repeatEnd ?? data.repeat_end, true);
+    const giftType = asNumber(data.giftType, asNumber(data.gift_type, asNumber(details.giftType, asNumber(details.gift_type, 0))));
+    const transactionId = asString(data.transactionId, asString(data.transaction_id, asString(details.transactionId, asString(details.transaction_id))));
     return {
       type: "gift",
       ...userFrom(data),
-      giftName: asString(data.giftName, asString(data.gift_name, "Presente")),
-      diamondCount: Math.max(1, asNumber(data.diamondCount, asNumber(data.diamond_count, 1))),
-      repeatCount: Math.max(1, asNumber(data.repeatCount, asNumber(data.repeat_count, 1))),
-      repeatEnd: data.repeatEnd !== false && data.repeat_end !== false,
+      giftName,
+      diamondCount,
+      repeatCount,
+      repeatEnd,
+      giftType: giftType || undefined,
+      transactionId: transactionId || undefined,
     };
   }
 
-  if (type === "like") {
+  if (type === "like" || type === "webcastlikemessage") {
     return { type: "like", ...userFrom(data), likeCount: Math.max(1, asNumber(data.likeCount, asNumber(data.like_count, 1))) };
   }
 
-  if (type === "follow") return { type: "follow", ...userFrom(data) };
-  if (type === "share") return { type: "share", ...userFrom(data) };
+  if (type === "follow" || type === "webcastfollowmessage") return { type: "follow", ...userFrom(data) };
+  if (type === "share" || type === "webcastsharemessage") return { type: "share", ...userFrom(data) };
 
   if (type === "member" || type === "join" || type === "syntheticjoinmessage") {
     return { type: "status", connected: true, uniqueId: userFrom(data).uniqueId, message: `${userFrom(data).nickname} entrou na live.` };
@@ -152,7 +179,7 @@ export function connectTikTokLive(
     "features.bundleEvents": "true",
     "features.rawMessages": "false",
     "features.normalizeUniqueId": "true",
-    schemaVersion: "v1",
+    schemaVersion: "v2",
   });
 
   const ws = new WebSocket(`wss://ws.eulerstream.com?${params.toString()}`);

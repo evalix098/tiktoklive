@@ -144,6 +144,8 @@ export class LiveSimulator {
         diamondCount: gift.diamonds,
         repeatCount: 1,
         repeatEnd: true,
+        giftType: gift.name === "Rosa" || gift.name === "TikTok" ? 1 : 0,
+        transactionId: `${uniqueId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       };
     }
     if (roll < 0.96) {
